@@ -4,14 +4,13 @@ import json
 from datetime import timedelta
 from threading import Event
 
-import trollius
+import asyncio
 
 from aiowsgi import create_server as create_wsgi_server
 from autobahn.asyncio.wamp import RouterFactory, RouterSessionFactory
 from autobahn.asyncio.websocket import WampWebSocketServerFactory
 from autobahn.wamp import types
 from flask import Flask
-from trollius.coroutines import From
 
 from app import app
 from buildman.enums import BuildJobResult, BuildServerStatus, RESULT_PHASES
@@ -108,7 +107,7 @@ class BuilderServer(object):
         self._lifecycle_manager.initialize(self._lifecycle_manager_config)
 
         logger.debug("Initializing all members of the event loop")
-        loop = trollius.get_event_loop()
+        loop = asyncio.get_event_loop()
 
         logger.debug(
             "Starting server on port %s, with controller on port %s",
@@ -175,7 +174,7 @@ class BuilderServer(object):
             minimum_extension=MINIMUM_JOB_EXTENSION,
         )
 
-    @trollius.coroutine
+    @asyncio.coroutine
     def _job_complete(self, build_job, job_status, executor_name=None, update_phase=False):
         if job_status == BuildJobResult.INCOMPLETE:
             logger.warning(
@@ -194,19 +193,19 @@ class BuilderServer(object):
 
         if update_phase:
             status_handler = StatusHandler(self._build_logs, build_job.repo_build.uuid)
-            yield From(status_handler.set_phase(RESULT_PHASES[job_status]))
+            yield from status_handler.set_phase(RESULT_PHASES[job_status])
 
         self._job_count = self._job_count - 1
 
         if self._current_status == BuildServerStatus.SHUTDOWN and not self._job_count:
             self._shutdown_event.set()
 
-    @trollius.coroutine
+    @asyncio.coroutine
     def _work_checker(self):
         logger.debug("Initializing work checker")
         while self._current_status == BuildServerStatus.RUNNING:
             with database.CloseForLongOperation(app.config):
-                yield From(trollius.sleep(WORK_CHECK_TIMEOUT))
+                yield from asyncio.sleep(WORK_CHECK_TIMEOUT)
 
             logger.debug(
                 "Checking for more work for %d active workers",
@@ -237,8 +236,8 @@ class BuilderServer(object):
             )
 
             try:
-                schedule_success, retry_timeout = yield From(
-                    self._lifecycle_manager.schedule(build_job)
+                schedule_success, retry_timeout = yield from self._lifecycle_manager.schedule(
+                    build_job
                 )
             except:
                 logger.warning(
@@ -253,7 +252,7 @@ class BuilderServer(object):
             if schedule_success:
                 logger.debug("Marking build %s as scheduled", build_job.repo_build.uuid)
                 status_handler = StatusHandler(self._build_logs, build_job.repo_build.uuid)
-                yield From(status_handler.set_phase(database.BUILD_PHASE.BUILD_SCHEDULED))
+                yield from status_handler.set_phase(database.BUILD_PHASE.BUILD_SCHEDULED)
 
                 self._job_count = self._job_count + 1
                 logger.debug(
@@ -273,7 +272,7 @@ class BuilderServer(object):
                 )
                 self._queue.incomplete(job_item, restore_retry=True, retry_after=retry_timeout)
 
-    @trollius.coroutine
+    @asyncio.coroutine
     def _queue_metrics_updater(self):
         logger.debug("Initializing queue metrics updater")
         while self._current_status == BuildServerStatus.RUNNING:
@@ -281,9 +280,9 @@ class BuilderServer(object):
             self._queue.update_metrics()
 
             logger.debug("Metrics going to sleep for 30 seconds")
-            yield From(trollius.sleep(30))
+            yield from asyncio.sleep(30)
 
-    @trollius.coroutine
+    @asyncio.coroutine
     def _initialize(self, loop, host, websocket_port, controller_port, ssl=None):
         self._loop = loop
 
@@ -295,10 +294,10 @@ class BuilderServer(object):
         create_wsgi_server(
             self._controller_app, loop=loop, host=host, port=controller_port, ssl=ssl
         )
-        yield From(loop.create_server(transport_factory, host, websocket_port, ssl=ssl))
+        yield from loop.create_server(transport_factory, host, websocket_port, ssl=ssl)
 
         # Initialize the metrics updater
-        trollius.async(self._queue_metrics_updater())
+        asyncio.ensure_future(self._queue_metrics_updater())
 
         # Initialize the work queue checker.
-        yield From(self._work_checker())
+        yield from self._work_checker()
